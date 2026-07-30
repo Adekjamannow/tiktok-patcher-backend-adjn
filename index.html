@@ -140,11 +140,11 @@
 
   <!-- Mode Toggle -->
   <div style="display:flex;gap:8px;margin-bottom:18px;">
-    <button class="mode-btn active" data-mode="patch" onclick="setMode('patch')" style="flex:1;padding:12px;border-radius:12px;border:1.5px solid var(--border);background:var(--green-bg);color:var(--green-dark);font-weight:600;cursor:pointer;">⚡ Patch</button>
-    <button class="mode-btn" data-mode="ffmpeg" onclick="setMode('ffmpeg')" style="flex:1;padding:12px;border-radius:12px;border:1.5px solid var(--border);background:var(--card);color:var(--muted);font-weight:600;cursor:pointer;">🎬 FFmpeg</button>
+    <button id="btnModePatch" class="mode-btn active" onclick="setMode('patch')" style="flex:1;padding:12px;border-radius:12px;border:1.5px solid var(--border);background:var(--green-bg);color:var(--green-dark);font-weight:600;cursor:pointer;">⚡ Patch Only</button>
+    <button id="btnModeFFmpeg" class="mode-btn" onclick="setMode('ffmpeg')" style="flex:1;padding:12px;border-radius:12px;border:1.5px solid var(--border);background:var(--card);color:var(--muted);font-weight:600;cursor:pointer;">🎬 FFmpeg+Patch</button>
   </div>
-  <div id="ffmpegNote" style="background:var(--cream2);border-radius:12px;padding:12px 14px;font-size:11px;color:var(--muted);margin-bottom:18px;display:none;">
-    FFmpeg Mode: cleanup video structure + moov di awal. Load dari CDN (~25MB first time).
+  <div id="ffmpegInfo" style="background:var(--cream2);border-radius:12px;padding:12px 14px;font-size:11px;color:var(--muted);margin-bottom:18px;display:none;">
+    FFmpeg: cleanup structure + moov di awal. Download ~30MB sekali, reuse otomatis.
   </div>
 
   <!-- Calibration Settings -->
@@ -206,49 +206,69 @@
 </div>
 <script>
 const $=id=>document.getElementById(id);
-let currentMode = 'patch'; // 'patch' | 'ffmpeg'
 let ffmpegInstance = null;
-let ffmpegLoaded = false;
 
-async function runFfmpeg(file) {
-  const backendURL = 'https://tiktok-patcher-backend-adjn.railway.app';
+async function initFFmpeg() {
+  if (ffmpegInstance) return ffmpegInstance;
   
-  addLog('Upload ke backend FFmpeg...', 'info');
-  const formData = new FormData();
-  formData.append('video', file);
+  addLog('Load FFmpeg WASM...', 'info');
   
   try {
-    setP(25);
-    const response = await fetch(`${backendURL}/api/ffmpeg-cleanup`, {
-      method: 'POST',
-      body: formData,
+    const { FFmpeg } = await import('https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');
+    const { toBlobURL } = await import('https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js');
+    
+    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+    const ff = new FFmpeg();
+    
+    ff.on('log', ({ message }) => addLog('[ffmpeg] ' + message, 'info'));
+    ff.on('progress', ({ progress }) => setP(15 + Math.round(progress * 70)));
+    
+    addLog('Download core files (~30MB first time)...', 'info');
+    await ff.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
     });
     
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Backend error');
-    }
-    
-    setP(88);
-    const cleaned = await response.arrayBuffer();
-    addLog('FFmpeg selesai', 'ok');
-    return new Uint8Array(cleaned);
-    
+    ffmpegInstance = ff;
+    addLog('FFmpeg ready', 'ok');
+    return ff;
   } catch(err) {
-    addLog('FFmpeg error: '+err.message, 'warn');
+    addLog('FFmpeg error: ' + err.message, 'warn');
     throw err;
   }
 }
 
+async function runFFmpegCleanup(file) {
+  const ff = await initFFmpeg();
+  const ext = file.name.substring(file.name.lastIndexOf('.')) || '.mp4';
+  const inName = 'in' + ext;
+  const outName = 'out' + ext;
+  
+  addLog('Write to FFmpeg...', 'info');
+  await ff.writeFile(inName, new Uint8Array(await file.arrayBuffer()));
+  setP(20);
+  
+  addLog('Processing (stream copy)...', 'info');
+  await ff.exec(['-i', inName, '-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart', outName]);
+  setP(88);
+  
+  addLog('Read result...', 'info');
+  const data = await ff.readFile(outName);
+  await ff.deleteFile(inName);
+  await ff.deleteFile(outName);
+  
+  return new Uint8Array(data);
+}
+
+let currentMode = 'patch';
+
 function setMode(mode) {
   currentMode = mode;
-  document.querySelectorAll('.mode-btn').forEach(b => {
-    const isActive = b.dataset.mode === mode;
-    b.classList.toggle('active', isActive);
-    b.style.background = isActive ? 'var(--green-bg)' : 'var(--card)';
-    b.style.color = isActive ? 'var(--green-dark)' : 'var(--muted)';
-  });
-  $('ffmpegNote').style.display = mode === 'ffmpeg' ? 'block' : 'none';
+  $('btnModePatch').style.background = mode === 'patch' ? 'var(--green-bg)' : 'var(--card)';
+  $('btnModePatch').style.color = mode === 'patch' ? 'var(--green-dark)' : 'var(--muted)';
+  $('btnModeFFmpeg').style.background = mode === 'ffmpeg' ? 'var(--green-bg)' : 'var(--card)';
+  $('btnModeFFmpeg').style.color = mode === 'ffmpeg' ? 'var(--green-dark)' : 'var(--muted)';
+  $('ffmpegInfo').style.display = mode === 'ffmpeg' ? 'block' : 'none';
 }
 
 // ============ FIXED PARAMETERS (sesuai kode asli) ============
@@ -681,70 +701,45 @@ $('btnGo').addEventListener('click',async()=>{
   setP(10);
 
   try{
+    let patchInput = selectedFile;
+    
     if(currentMode==='ffmpeg'){
-      addLog('Mode: FFmpeg Cleanup','info');
-      const cleaned = await runFfmpeg(selectedFile);
+      addLog('Mode: FFmpeg + Patch','info');
+      const cleaned = await runFFmpegCleanup(selectedFile);
+      patchInput = new File([cleaned], 'temp.mp4', {type:'video/mp4'});
       setP(90);
-      
-      addLog('Patch hasil FFmpeg...','info');
-      const patch = runCalibration(cleaned, (msg,type)=>{addLog(msg,type);});
-      setP(95);
-      
-      const blob=new Blob([patch.output],{type:selectedFile.type||'video/mp4'});
-      const url=URL.createObjectURL(blob);
-      const base=selectedFile.name.replace(/\.[^/.]+$/,'');
-      $('btnDl').href=url;
-      $('btnDl').download=base+'_ffmpeg_patched.mp4';
-      $('btnDl').classList.add('show');
-      $('btnReset').classList.add('show');
-      
-      $('sReal').textContent=patch.realSamples;
-      $('sFake').textContent=patch.fakeSamples;
-      $('sFake').classList.remove('empty');
-      $('sSize').textContent=fmtSz(patch.output.length);
-      $('sSize').classList.remove('empty');
-      
-      setP(100);
-      addLog('FFmpeg + Patch selesai!','ok');
-      
-      const a=document.createElement('a');
-      a.href=url;a.download=base+'_ffmpeg_patched.mp4';
-      document.body.appendChild(a);a.click();a.remove();
-      addLog('File otomatis terdownload sebagai *_ffmpeg_patched.mp4','ok');
-      
-    }else{
-      addLog('Memulai kalibrasi...','info');
-      const arrayBuffer=await selectedFile.arrayBuffer();
-      setP(30);
-      addLog('Membaca struktur MP4...','info');
-
-      const patch = runCalibration(arrayBuffer, (msg,type)=>{addLog(msg,type);});
-      setP(85);
-
-      const blob=new Blob([patch.output],{type:selectedFile.type||'video/mp4'});
-      const url=URL.createObjectURL(blob);
-      const base=selectedFile.name.replace(/\.[^/.]+$/,'');
-      $('btnDl').href=url;
-      $('btnDl').download=base+'_calibrated.mp4';
-      $('btnDl').classList.add('show');
-      $('btnReset').classList.add('show');
-
-      $('sReal').textContent=patch.realSamples;
-      $('sFake').textContent=patch.fakeSamples;
-      $('sFake').classList.remove('empty');
-      $('sSize').textContent=fmtSz(patch.output.length);
-      $('sSize').classList.remove('empty');
-
-      setP(100);
-      addLog('Kalibrasi selesai!','ok');
-      addLog(patch.realSamples+' real + '+patch.fakeSamples+' fake samples','info');
-      addLog('Ukuran akhir: '+fmtSz(patch.output.length),'ok');
-
-      const a=document.createElement('a');
-      a.href=url;a.download=base+'_calibrated.mp4';
-      document.body.appendChild(a);a.click();a.remove();
-      addLog('File otomatis terdownload sebagai *_calibrated.mp4','ok');
     }
+    
+    addLog('Memulai kalibrasi...','info');
+    const arrayBuffer = await patchInput.arrayBuffer();
+    setP(currentMode==='patch' ? 30 : 92);
+
+    const patch = runCalibration(arrayBuffer, (msg,type)=>{addLog(msg,type);});
+    setP(currentMode==='patch' ? 85 : 95);
+
+    const blob=new Blob([patch.output],{type:patchInput.type||'video/mp4'});
+    const url=URL.createObjectURL(blob);
+    const base=selectedFile.name.replace(/\.[^/.]+$/,'');
+    const suffix = currentMode==='ffmpeg' ? '_ffmpeg_patched' : '_calibrated';
+    $('btnDl').href=url;
+    $('btnDl').download=base+suffix+'.mp4';
+    $('btnDl').classList.add('show');
+    $('btnReset').classList.add('show');
+
+    $('sReal').textContent=patch.realSamples;
+    $('sFake').textContent=patch.fakeSamples;
+    $('sFake').classList.remove('empty');
+    $('sSize').textContent=fmtSz(patch.output.length);
+    $('sSize').classList.remove('empty');
+
+    setP(100);
+    addLog('Selesai!','ok');
+    addLog(patch.realSamples+' real + '+patch.fakeSamples+' fake samples','info');
+
+    const a=document.createElement('a');
+    a.href=url;a.download=base+suffix+'.mp4';
+    document.body.appendChild(a);a.click();a.remove();
+    addLog('Download: '+base+suffix+'.mp4','ok');
 
   } catch(err){
     addLog('Error: '+err.message,'warn');
