@@ -4,16 +4,27 @@ const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const fs = require('fs');
 const path = require('path');
+const { exec } = require('child_process');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
+
+// Check FFmpeg availability
+exec('which ffmpeg', (error, stdout) => {
+  if (error) {
+    console.warn('⚠️  FFmpeg not found');
+  } else {
+    console.log('✓ FFmpeg:', stdout.trim());
+    ffmpeg.setFfmpegPath(stdout.trim());
+  }
+});
 
 app.use(cors());
 app.use(express.json());
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'TikTok Patcher Backend running' });
+  res.json({ status: 'ok', message: 'TikTok Patcher Backend', time: new Date().toISOString() });
 });
 
 // FFmpeg cleanup endpoint
